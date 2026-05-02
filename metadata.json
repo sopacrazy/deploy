@@ -1,0 +1,6 @@
+{
+  "name": "Deploy",
+  "description": "Uma aplicação web desktop-style para automatizar deploys de projetos Node.js em servidores Linux via SSH/SCP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
