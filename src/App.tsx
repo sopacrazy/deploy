@@ -44,6 +44,7 @@ declare global {
       saveProjects: (projects: any[]) => Promise<any>;
       listFiles: (dir: string) => Promise<any>;
       runDeploy: (config: any) => Promise<any>;
+      onDeployLog: (callback: (log: any) => void) => void;
     }
   }
 }
@@ -106,7 +107,8 @@ export default function App() {
     pm2Service: '',
     localPath: '', 
     files: [],
-    runNpmInstall: true
+    runNpmInstall: true,
+    notes: ''
   };
 
   const saveProjects = async (updatedProjects: any[]) => {
@@ -158,28 +160,104 @@ export default function App() {
   const [explorerMode, setExplorerMode] = useState<'files' | 'folder'>('files');
   const [currentBrowsingDir, setCurrentBrowsingDir] = useState('');
   const [parentBrowsingDir, setParentBrowsingDir] = useState<string | null>(null);
+  const [explorerError, setExplorerError] = useState<string | null>(null);
+  const [isExplorerLoading, setIsExplorerLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => localStorage.getItem('isSidebarCollapsed') === 'true');
+  const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  const terminalRef = useRef<HTMLDivElement>(null);
+  
+  // Terminal Simulation Logic
+  useEffect(() => {
+    const commands = [
+      "[INFO] Verificando integridade dos pacotes...",
+      "[OK] Dependências em conformidade.",
+      "[SSH] Estabelecendo túnel seguro com node-01...",
+      "[SEC] Criptografia AES-256 ativa.",
+      "[INFO] Monitorando tráfego na porta 4006...",
+      "[OK] Proxy reverso Apache respondendo em 12ms.",
+      "[SYSTEM] Memória swap otimizada.",
+      "[WARN] Tentativa de acesso não autorizado bloqueada: 192.168.1.45",
+      "[INFO] Sincronizando repositórios locais...",
+      "[OK] Cache de build atualizado.",
+      "[PROCESS] PM2 monitorando 4 instâncias.",
+      "[STATUS] Sistema operacional estável.",
+      "[INFO] Verificando atualizações de kernel...",
+      "[OK] Kernel 5.15.0-72-GENERIC é a versão mais recente.",
+      "[NETWORK] Latência média: 45ms",
+      "[STORAGE] Espaço em disco: 82% livre.",
+      "[DEBUG] Ciclo de coleta de lixo finalizado.",
+      "[OK] Heartbeat enviado para o painel central."
+    ];
+
+    let i = 0;
+    const interval = setInterval(() => {
+      setTerminalLogs(prev => {
+        const next = [...prev, commands[i]];
+        i = (i + 1) % commands.length;
+        // Manter um histórico maior para o scroll ser suave
+        if (next.length > 50) return next.slice(1);
+        return next;
+      });
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-scroll logic
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.scrollTo({
+        top: terminalRef.current.scrollHeight,
+        behavior: 'smooth'
+      });
+    }
+  }, [terminalLogs]);
+  const [expandedProjects, setExpandedProjects] = useState<string[]>(() => {
+    const saved = localStorage.getItem('expandedProjects');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('expandedProjects', JSON.stringify(expandedProjects));
+  }, [expandedProjects]);
+
+  const toggleProjectExpand = (id: string) => {
+    setExpandedProjects(prev => 
+      prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
+    );
+  };
 
   useEffect(() => {
     localStorage.setItem('isSidebarCollapsed', String(isSidebarCollapsed));
   }, [isSidebarCollapsed]);
 
+
   // Fetch real file tree when explorer opens
   useEffect(() => {
     if (isExplorerOpen) {
+      setIsExplorerLoading(true);
+      setExplorerError(null);
+      
       const dirToFetch = currentBrowsingDir || (explorerMode === 'files' ? config.localPath : '');
       
       const handleData = (data: any) => {
+        setIsExplorerLoading(false);
+        if (data.error) {
+          setExplorerError(data.error);
+          setFileTree([]);
+          return;
+        }
+
         if (data.files && Array.isArray(data.files)) {
           setFileTree(data.files);
           setCurrentBrowsingDir(data.currentDir);
           setParentBrowsingDir(data.parentDir);
         } else {
-          console.error("Backend não retornou o formato esperado:", data);
+          setExplorerError("Resposta inválida do servidor");
           setFileTree([]);
         }
       };
@@ -188,7 +266,8 @@ export default function App() {
         window.electronAPI.listFiles(dirToFetch)
           .then(handleData)
           .catch(err => {
-            console.error("Erro ao ler pasta local via IPC:", err);
+            setIsExplorerLoading(false);
+            setExplorerError(err.message);
             setFileTree([]);
           });
       } else {
@@ -196,12 +275,13 @@ export default function App() {
           .then(res => res.json())
           .then(handleData)
           .catch(err => {
-            console.error("Erro ao ler pasta local:", err);
+            setIsExplorerLoading(false);
+            setExplorerError(err.message);
             setFileTree([]);
           });
       }
     }
-  }, [isExplorerOpen, currentBrowsingDir, explorerMode]);
+  }, [isExplorerOpen, currentBrowsingDir]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -211,65 +291,65 @@ export default function App() {
   }, [logs]);
 
   const addLog = (msg: string, type: 'info' | 'success' | 'error' = 'info') => {
-    setLogs(prev => [...prev, `[${type.toUpperCase()}] ${msg}`]);
+    const emoji = type === 'success' ? '✅' : (type === 'error' ? '❌' : 'ℹ️');
+    setLogs(prev => [...prev, `${emoji} ${msg}`]);
   };
+
+  useEffect(() => {
+    if (window.electronAPI && window.electronAPI.onDeployLog) {
+      window.electronAPI.onDeployLog((log: any) => {
+        addLog(log.message, log.type);
+      });
+    }
+  }, []);
 
   const startSending = async () => {
     if (!selectedProject || config.files.length === 0) return;
     
     setLogs([]);
-    setLogs(prev => [...prev, `🚀 Iniciando deploy real: ${selectedProject.name}`]);
-    setLogs(prev => [...prev, `📂 Origem: ${config.localPath}`]);
-    setLogs(prev => [...prev, `🌐 Destino: ${config.sshHost}:${config.destPath}`]);
+    addLog(`Iniciando deploy real: ${selectedProject.name}`, 'info');
+    addLog(`Origem: ${config.localPath}`, 'info');
+    addLog(`Destino: ${config.sshHost}:${config.destPath}`, 'info');
     
     setIsSending(true);
-    const loadingInterval = setInterval(() => {
-      setLogs(prev => {
-        const last = prev[prev.length - 1];
-        if (last && last.startsWith('⏳ Processando')) {
-          const dots = last.split('.').length - 1;
-          return [...prev.slice(0, -1), `⏳ Processando${'.'.repeat((dots % 3) + 1)}` ];
-        }
-        return [...prev, '⏳ Processando.'];
-      });
-    }, 500);
 
     try {
-      // Log individual files being sent
-      setLogs(prev => [...prev, `📦 Preparando ${config.files.length} item(s)...`]);
+      addLog(`Preparando ${config.files.length} item(s)...`, 'info');
+      
+      const needsBuild = config.files.some(f => f.toLowerCase().includes('dist') || f.toLowerCase().includes('build'));
+      if (needsBuild) {
+        addLog(`⏳ Detectada pasta de build/dist. Iniciando build automático...`, 'info');
+        addLog(`ℹ️ Verifique o terminal do backend para acompanhar o progresso real do npm run build.`, 'info');
+      }
       
       let result;
       if (window.electronAPI) {
         result = await window.electronAPI.runDeploy({ config });
       } else {
+        // Fallback para quando não estiver no Electron (via API)
         const response = await fetch(`${API_BASE}/api/deploy`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ config })
         });
         result = await response.json();
+        
+        // Se houver log detalhado do backend e não estiver no Electron (onde já recebemos via stream), use-o
+        if (result.log && Array.isArray(result.log)) {
+          result.log.forEach((entry: any) => {
+            addLog(entry.message, entry.type);
+          });
+        }
       }
       
-      clearInterval(loadingInterval);
-      setLogs(prev => prev.filter(l => !l.startsWith('⏳ Processando')));
-      
-      // Se houver log detalhado do backend, use-o
-      if (result.log && Array.isArray(result.log)) {
-        result.log.forEach((entry: any) => {
-          setLogs(prev => [...prev, `${entry.type === 'success' ? '✅' : (entry.type === 'error' ? '❌' : 'ℹ️')} [${entry.timestamp}] ${entry.message}`]);
-        });
-      }
-
       if (result.success) {
-        setLogs(prev => [...prev, `\n✅ Sucesso: ${result.message}`]);
+        addLog(`Deploy e movimentação finalizados com sucesso!`, 'success');
         updateConfig({ lastDeploy: new Date().toLocaleString() });
       } else {
-        setLogs(prev => [...prev, `\n❌ Erro no processo: ${result.error}`]);
+        addLog(`Erro no processo: ${result.error}`, 'error');
       }
     } catch (err: any) {
-      clearInterval(loadingInterval);
-      setLogs(prev => prev.filter(l => !l.startsWith('⏳ Processando')));
-      setLogs(prev => [...prev, `❌ Falha crítica de rede/servidor: ${err.message}`]);
+      addLog(`Falha crítica: ${err.message}`, 'error');
     } finally {
       setIsSending(false);
     }
@@ -335,7 +415,8 @@ export default function App() {
         pm2Service: '',
         localPath: '',
         files: ['dist'],
-        runNpmInstall: true
+        runNpmInstall: true,
+        notes: ''
       }
     };
     const updated = [...projects, newProject];
@@ -359,139 +440,264 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#111111] text-gray-200 overflow-hidden font-sans">
+    <div className="flex h-screen w-full bg-[#1e1e1e] text-[#cccccc] overflow-hidden font-sans select-none">
       
-      {/* SIDEBAR */}
-      <motion.div 
-        animate={{ width: isSidebarCollapsed ? 64 : 260 }}
-        transition={{ duration: 0.3, ease: 'easeInOut' }}
-        className="bg-[#1a1a1a] border-r border-[#333] flex flex-col shrink-0 relative z-20"
-      >
-        <div className={`p-4 flex items-center border-b border-[#333] ${isSidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
-          {!isSidebarCollapsed && (
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded bg-emerald-500/20 text-emerald-500 flex items-center justify-center">
-                <TerminalSquare size={20} />
-              </div>
-              <h1 className="font-semibold tracking-tight text-white">Deploy</h1>
-            </div>
-          )}
-          {isSidebarCollapsed && (
-            <div className="w-8 h-8 rounded bg-emerald-500/20 text-emerald-500 flex items-center justify-center">
-              <TerminalSquare size={20} />
-            </div>
-          )}
-          
+      {/* ACTIVITY BAR (VS CODE STYLE) */}
+      <div className="w-[50px] bg-[#333333] flex flex-col items-center py-2 gap-0 border-r border-[#2b2b2b] shrink-0 z-30">
+        <button 
+          onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+          className="w-full p-3 text-gray-400 hover:text-white transition-colors flex justify-center mb-2"
+          title={isSidebarCollapsed ? "Expandir Menu" : "Recolher Menu"}
+        >
+          <Menu size={24} strokeWidth={1.5} />
+        </button>
+
+        <button 
+          onClick={() => {
+            if (activeTab === 'home') setIsSidebarCollapsed(!isSidebarCollapsed);
+            else { setActiveTab('home'); setIsSidebarCollapsed(false); }
+          }}
+          className={`w-full p-3 transition-colors relative group flex justify-center ${activeTab === 'home' ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
+          title="Home"
+        >
+          <HomeIcon size={24} strokeWidth={1.5} />
+          {activeTab === 'home' && <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-white" />}
+        </button>
+
+        <button 
+          onClick={() => {
+            if (activeTab === 'enviar') setIsSidebarCollapsed(!isSidebarCollapsed);
+            else { setActiveTab('enviar'); setIsSidebarCollapsed(false); }
+          }}
+          className={`w-full p-3 transition-colors relative group flex justify-center ${activeTab === 'enviar' ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
+          title="Deploy"
+        >
+          <Rocket size={24} strokeWidth={1.5} />
+          {activeTab === 'enviar' && <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-white" />}
+        </button>
+
+        <button 
+          onClick={() => {
+            if (activeTab === 'config') setIsSidebarCollapsed(!isSidebarCollapsed);
+            else { setActiveTab('config'); setIsSidebarCollapsed(false); }
+          }}
+          className={`w-full p-3 transition-colors relative group flex justify-center ${activeTab === 'config' ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
+          title="Configurações Globais"
+        >
+          <Settings size={24} strokeWidth={1.5} />
+          {activeTab === 'config' && <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-white" />}
+        </button>
+
+        <div className="mt-auto flex flex-col w-full">
           <button 
-            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-            className={`p-1.5 rounded-md text-gray-500 hover:text-white hover:bg-[#333] transition-colors ${isSidebarCollapsed ? 'mt-2' : ''}`}
-            title={isSidebarCollapsed ? "Expandir" : "Recolher"}
+            onClick={() => setIsNewProjectModalOpen(true)}
+            className="w-full p-3 text-gray-500 hover:text-gray-300 transition-colors flex justify-center"
+            title="Novo Projeto"
           >
-            {isSidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+            <Plus size={24} strokeWidth={1.5} />
           </button>
         </div>
+      </div>
 
-        <div className="flex-1 overflow-y-auto py-4 overflow-x-hidden">
-          {!isSidebarCollapsed && (
-            <div className="px-4 mb-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-              Projetos Salvos
-            </div>
-          )}
-          <div className="space-y-1">
-            {projects.map(p => (
-              <div key={p.id} className="relative group">
-                <button
-                  onClick={() => setSelectedProjectId(p.id)}
-                  className={`w-full text-left px-4 py-3 flex items-center gap-3 transition-colors border-l-2
-                    ${selectedProjectId === p.id 
-                      ? 'border-emerald-500 bg-[#252525]' 
-                      : 'border-transparent hover:bg-[#222]'}
-                    ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                >
-                  <div className={`shrink-0 ${selectedProjectId === p.id ? 'text-emerald-500' : 'text-gray-500'}`}>
-                    <Server size={18} />
-                  </div>
-                  {!isSidebarCollapsed && (
-                    <div className="flex flex-col gap-0.5 overflow-hidden">
-                      <span className={`font-medium truncate ${selectedProjectId === p.id ? 'text-white' : 'text-gray-300'}`}>
-                        {p.name}
-                      </span>
-                      <span className="text-[10px] text-gray-500 font-mono truncate">Último: {p.lastDeploy}</span>
-                    </div>
-                  )}
-                </button>
-                {!isSidebarCollapsed && (
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); setProjectToDelete(p.id); }}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-gray-600 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1a1a1a] rounded-md shadow-lg"
-                    title="Excluir Projeto"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                )}
-              </div>
-            ))}
+      {/* SIDEBAR (EXPLORER STYLE) */}
+      <motion.div 
+        animate={{ width: isSidebarCollapsed ? 0 : 250 }}
+        transition={{ duration: 0.2, ease: 'easeInOut' }}
+        className="bg-[#252526] border-r border-[#2b2b2b] flex flex-col shrink-0 relative z-20 overflow-hidden"
+      >
+        <div className="h-10 px-4 flex items-center justify-between text-[12px] font-semibold text-gray-400 uppercase tracking-wider">
+          <span>Explorer</span>
+          <div className="flex gap-1">
+             <button onClick={() => setIsNewProjectModalOpen(true)} className="p-1 hover:bg-[#37373d] rounded transition-colors" title="Novo Projeto">
+               <Plus size={16} />
+             </button>
+             <button onClick={() => setIsSidebarCollapsed(true)} className="p-1 hover:bg-[#37373d] rounded transition-colors" title="Recolher Sidebar">
+               <ChevronLeft size={16} />
+             </button>
           </div>
         </div>
 
-        <div className="p-4 border-t border-[#333]">
-          <button 
-            onClick={() => setIsNewProjectModalOpen(true)}
-            className={`w-full py-2 rounded-md border border-dashed border-[#444] text-gray-400 hover:text-white hover:border-emerald-500 hover:bg-emerald-500/10 transition-all flex items-center justify-center gap-2 text-sm font-medium ${isSidebarCollapsed ? 'px-0' : 'px-4'}`}
-            title="Novo Projeto"
-          >
-            <Plus size={16} />
-            {!isSidebarCollapsed && "Novo Projeto"}
-          </button>
+        <div className="flex-1 overflow-y-auto">
+          {/* PROJETOS SECTION */}
+          <div className="border-t border-[#2b2b2b]">
+            <div className="bg-[#37373d]/30 h-7 px-1 flex items-center gap-1 text-[12px] font-bold text-white uppercase cursor-pointer hover:bg-[#37373d]/50">
+              <ChevronRight size={16} className="rotate-90" />
+              <span>Projetos</span>
+            </div>
+            
+            <div className="py-1">
+              {projects.map(p => (
+                <div key={p.id} className="flex flex-col">
+                  {/* Project Folder Item */}
+                  <div 
+                    onClick={() => {
+                      setSelectedProjectId(p.id);
+                      toggleProjectExpand(p.id);
+                    }}
+                    className={`group flex items-center h-8 px-1 cursor-pointer transition-colors
+                      ${selectedProjectId === p.id ? 'bg-[#37373d] text-white' : 'hover:bg-[#2a2d2e] text-gray-400 hover:text-gray-200'}`}
+                  >
+                    <div className="w-5 h-5 flex items-center justify-center">
+                      <motion.div
+                        animate={{ rotate: expandedProjects.includes(p.id) ? 90 : 0 }}
+                        transition={{ duration: 0.1 }}
+                      >
+                        <ChevronRight size={16} />
+                      </motion.div>
+                    </div>
+                    <div className={`w-5 h-5 flex items-center justify-center mr-1.5 ${p.color === 'yellow' ? 'text-yellow-400' : 'text-blue-400'}`}>
+                      <FolderOpen size={16} fill="currentColor" fillOpacity={0.2} />
+                    </div>
+                    <span className="text-[14px] truncate flex-1 font-medium">{p.name}</span>
+                    
+                    {/* Delete button only on hover */}
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); setProjectToDelete(p.id); }}
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-[#454545] rounded text-gray-400 hover:text-red-400 transition-all mr-1"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+
+                  {/* Expanded Content (Files/Settings inside project) */}
+                  <AnimatePresence>
+                    {expandedProjects.includes(p.id) && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="pl-6 flex flex-col pb-1">
+                          {/* Sub-item: Enviar */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedProjectId(p.id);
+                              setActiveTab('enviar');
+                            }}
+                            className={`flex items-center h-7 px-2 gap-2 cursor-pointer hover:bg-[#2a2d2e] transition-colors text-[14px] w-full text-left
+                              ${selectedProjectId === p.id && activeTab === 'enviar' ? 'bg-[#37373d] text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                          >
+                            <Rocket size={14} className="text-emerald-500" />
+                            <span>Deploy</span>
+                          </button>
+                          
+                          {/* Sub-item: Configuração */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedProjectId(p.id);
+                              setActiveTab('config');
+                            }}
+                            className={`flex items-center h-7 px-2 gap-2 cursor-pointer hover:bg-[#2a2d2e] transition-colors text-[14px] w-full text-left
+                              ${selectedProjectId === p.id && activeTab === 'config' ? 'bg-[#37373d] text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                          >
+                            <Settings size={14} className="text-gray-500" />
+                            <span>Configuração</span>
+                          </button>
+
+                          {/* Sub-item: Anotações */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedProjectId(p.id);
+                              setActiveTab('anotacoes');
+                            }}
+                            className={`flex items-center h-7 px-2 gap-2 cursor-pointer hover:bg-[#2a2d2e] transition-colors text-[14px] w-full text-left
+                              ${selectedProjectId === p.id && activeTab === 'anotacoes' ? 'bg-[#37373d] text-white' : 'text-gray-400 hover:text-gray-200'}`}
+                          >
+                            <TerminalSquare size={14} className="text-yellow-500" />
+                            <span>Anotações</span>
+                          </button>
+
+                          {/* Sub-item: Logs (Quick info) */}
+                          <div className="flex items-center h-6 px-1 gap-2 text-[10px] text-gray-500 font-mono italic">
+                            <Activity size={10} />
+                            <span>{p.lastDeploy || 'Sem deploy'}</span>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
+
+        {/* RE-OPEN SIDEBAR BUTTON (Floating when collapsed) */}
+        {isSidebarCollapsed && (
+          <button 
+            onClick={() => setIsSidebarCollapsed(false)}
+            className="absolute left-0 top-0 bottom-0 w-1 hover:bg-emerald-500/20 transition-colors z-50"
+            title="Abrir Explorer"
+          />
+        )}
       </motion.div>
 
       {/* MAIN CONTAINER */}
-      <div className="flex-1 flex flex-col min-w-0 bg-[#0a0a0a]">
+      <div className="flex-1 flex flex-col min-w-0 bg-[#1e1e1e]">
         
-        {/* HEADER */}
-        <header className="h-16 border-b border-[#222] bg-[#111111] flex items-center px-6 shrink-0">
-          <h2 className="text-lg font-medium text-white flex gap-2 items-center">
-            {selectedProject?.name || 'Nenhum Projeto'}
-          </h2>
-          
-          {/* TABS */}
-          <div className="ml-12 flex gap-1 bg-[#1a1a1a] p-1 rounded-lg border border-[#333]">
-            <button
+        {/* HEADER (VS CODE TABS STYLE) */}
+        <header className="h-9 bg-[#252526] flex items-center overflow-hidden shrink-0">
+          <div className="flex h-full">
+            <div 
+              className={`px-3 flex items-center gap-2 text-[12px] h-full cursor-pointer transition-colors border-r border-[#1e1e1e] group
+                ${activeTab === 'home' ? 'bg-[#1e1e1e] text-white border-t border-t-emerald-500' : 'bg-[#2d2d2d] text-gray-500 hover:bg-[#2a2d2e]'}`}
               onClick={() => setActiveTab('home')}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'home' 
-                ? 'bg-emerald-500/20 text-emerald-400 shadow-sm border border-emerald-500/30' 
-                : 'text-gray-400 hover:text-gray-200 hover:bg-[#252525]'
-              }`}
             >
-              <HomeIcon size={16} />
-              Home
-            </button>
-            <button
-              onClick={() => setActiveTab('enviar')}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'enviar' 
-                ? 'bg-[#333] text-white shadow-sm' 
-                : 'text-gray-400 hover:text-gray-200 hover:bg-[#252525]'
-              }`}
-            >
-              <Send size={16} />
-              Enviar
-            </button>
-            <button
-              onClick={() => setActiveTab('config')}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'config' 
-                ? 'bg-[#333] text-white shadow-sm' 
-                : 'text-gray-400 hover:text-gray-200 hover:bg-[#252525]'
-              }`}
-            >
-              <Settings size={16} />
-              Configuração
-            </button>
+              <HomeIcon size={14} className="text-emerald-500" />
+              <span>Dashboard</span>
+            </div>
+
+            {selectedProject && (
+              <>
+                <div 
+                  className={`px-3 flex items-center gap-2 text-[12px] h-full cursor-pointer transition-colors border-r border-[#1e1e1e] group
+                    ${activeTab === 'enviar' ? 'bg-[#1e1e1e] text-white border-t border-t-blue-500' : 'bg-[#2d2d2d] text-gray-500 hover:bg-[#2a2d2e]'}`}
+                  onClick={() => setActiveTab('enviar')}
+                >
+                  <Rocket size={14} className="text-blue-400" />
+                  <span>Deploy: {selectedProject.name}</span>
+                </div>
+
+                <div 
+                  className={`px-3 flex items-center gap-2 text-[12px] h-full cursor-pointer transition-colors border-r border-[#1e1e1e] group
+                    ${activeTab === 'config' ? 'bg-[#1e1e1e] text-white border-t border-t-orange-500' : 'bg-[#2d2d2d] text-gray-500 hover:bg-[#2a2d2e]'}`}
+                  onClick={() => setActiveTab('config')}
+                >
+                  <Settings size={14} className="text-gray-400" />
+                  <span>Config: {selectedProject.name}</span>
+                </div>
+
+                <div 
+                  className={`px-3 flex items-center gap-2 text-[12px] h-full cursor-pointer transition-colors border-r border-[#1e1e1e] group
+                    ${activeTab === 'anotacoes' ? 'bg-[#1e1e1e] text-white border-t border-t-yellow-500' : 'bg-[#2d2d2d] text-gray-500 hover:bg-[#2a2d2e]'}`}
+                  onClick={() => setActiveTab('anotacoes')}
+                >
+                  <TerminalSquare size={14} className="text-yellow-500" />
+                  <span>Notes: {selectedProject.name}</span>
+                </div>
+              </>
+            )}
           </div>
         </header>
+
+        {/* BREADCRUMBS */}
+        <div className="h-6 bg-[#1e1e1e] flex items-center px-4 text-[11px] text-gray-500 gap-2 border-b border-[#2b2b2b]/50">
+          <span className="hover:text-gray-300 cursor-pointer">Projetos</span>
+          {selectedProject && (
+            <>
+              <ChevronRight size={12} />
+              <span className="hover:text-gray-300 cursor-pointer">{selectedProject.name}</span>
+              <ChevronRight size={12} />
+              <span className="text-gray-300 font-medium">
+                {activeTab === 'home' ? 'Dashboard' : activeTab === 'enviar' ? 'Deploy' : activeTab === 'config' ? 'Configuração' : 'Anotações'}
+              </span>
+            </>
+          )}
+        </div>
 
         {/* SCANLINE & GRAIN EFFECT */}
         {activeTab === 'home' && (
@@ -518,17 +724,17 @@ export default function App() {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-emerald-500 text-xs font-bold uppercase tracking-[0.3em]">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    System Status: Secure
+                    Status do Sistema: Seguro
                   </div>
                   <h1 className="text-4xl font-black text-white flex items-baseline gap-2">
-                    <span className="text-emerald-500">FF</span>_CORE <span className="text-xs text-gray-600 font-normal">v4.0.8-stable</span>
+                    <span className="text-emerald-500">FF</span>_NÚCLEO <span className="text-xs text-gray-600 font-normal">v4.0.8-estável</span>
                   </h1>
                 </div>
                 <div className="text-[10px] text-gray-500 text-right space-y-0.5 mt-4 md:mt-0">
-                  <p>OS: LINUX_NODE_X64</p>
+                  <p>SO: LINUX_NODE_X64</p>
                   <p>KERNEL: 5.15.0-72-GENERIC</p>
-                  <p>LOCAL_IP: 127.0.0.1</p>
-                  <p>TIMESTAMP: {new Date().toISOString()}</p>
+                  <p>IP_LOCAL: 127.0.0.1</p>
+                  <p>HORÁRIO: {new Date().toLocaleString()}</p>
                 </div>
               </div>
 
@@ -540,14 +746,14 @@ export default function App() {
                   <div className="bg-[#111] border border-[#222] rounded-lg p-4 relative overflow-hidden group hover:border-emerald-500/30 transition-colors">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest flex items-center gap-2">
-                        <Wifi size={12} /> Active Nodes
+                        <Wifi size={12} /> Nós Ativos
                       </h3>
                       <span className="text-[9px] text-gray-600">0{projects.length} online</span>
                     </div>
                     <div className="space-y-3">
                       {projects.map((p, i) => (
                         <div key={i} className="flex items-center gap-3 group/item">
-                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          <div className={`w-1.5 h-1.5 rounded-full ${p.color === 'yellow' ? 'bg-yellow-500' : 'bg-emerald-500'}`} />
                           <div className="flex-1 min-w-0">
                             <div className="text-[11px] text-gray-300 font-bold truncate group-hover/item:text-emerald-400 transition-colors">{p.name}</div>
                             <div className="text-[9px] text-gray-600 font-mono">{p.config.sshHost}</div>
@@ -557,7 +763,7 @@ export default function App() {
                       ))}
                     </div>
                     <div className="mt-6 pt-4 border-t border-[#222]">
-                       <div className="text-[9px] text-gray-500 uppercase mb-2">Network Traffic</div>
+                       <div className="text-[9px] text-gray-500 uppercase mb-2">Tráfego de Rede</div>
                        <div className="flex gap-0.5 h-4 items-end">
                          {[...Array(20)].map((_, i) => (
                            <motion.div 
@@ -573,20 +779,20 @@ export default function App() {
 
                   <div className="bg-[#111] border border-[#222] rounded-lg p-4">
                     <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-                      <Lock size={12} /> Auth Protocols
+                      <Lock size={12} /> Protocolos de Autenticação
                     </h3>
                     <div className="space-y-4">
                       <div className="flex justify-between items-center text-[10px]">
                         <span className="text-gray-600">SSH_AUTH</span>
-                        <span className="text-emerald-500">RSA_ENABLED</span>
+                        <span className="text-emerald-500">RSA_ATIVO</span>
                       </div>
                       <div className="flex justify-between items-center text-[10px]">
                         <span className="text-gray-600">SSL_PROXY</span>
-                        <span className="text-emerald-500">ACTIVE</span>
+                        <span className="text-emerald-500">ATIVO</span>
                       </div>
                       <div className="flex justify-between items-center text-[10px]">
                         <span className="text-gray-600">FIREWALL</span>
-                        <span className="text-red-500/70">BYPASSED</span>
+                        <span className="text-red-500/70">BYPASS</span>
                       </div>
                     </div>
                   </div>
@@ -627,14 +833,14 @@ export default function App() {
                         </div>
                       </div>
                       <div className="space-y-1">
-                        <h2 className="text-2xl font-black text-white tracking-[0.2em] uppercase">Ready for Deployment</h2>
-                        <p className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest">Protocols initialized // Waiting for Project Selection</p>
+                        <h2 className="text-2xl font-black text-white tracking-[0.2em] uppercase">Pronto para Deploy</h2>
+                        <p className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest">Protocolos inicializados // Aguardando seleção de projeto</p>
                       </div>
                       <button 
                         onClick={() => setActiveTab('enviar')}
                         className="px-8 py-3 bg-emerald-600 hover:bg-emerald-500 text-black font-black uppercase text-xs tracking-[0.3em] rounded-sm transition-all transform hover:scale-105 active:scale-95 shadow-[0_0_30px_rgba(16,185,129,0.3)]"
                       >
-                        Launch_Terminal
+                        Abrir_Terminal
                       </button>
                     </div>
 
@@ -647,9 +853,9 @@ export default function App() {
 
                   <div className="grid grid-cols-3 gap-6">
                     {[
-                      { label: 'CPU_LOAD', value: '0.4%', icon: Cpu },
-                      { label: 'MEM_ALLOC', value: '1.2GB', icon: Database },
-                      { label: 'HDD_AVAIL', value: '450GB', icon: HardDrive },
+                      { label: 'USO_CPU', value: '0.4%', icon: Cpu },
+                      { label: 'MEM_ALOCADA', value: '1.2GB', icon: Database },
+                      { label: 'DISCO_DISP', value: '450GB', icon: HardDrive },
                     ].map((m, i) => (
                       <div key={i} className="bg-[#111] border border-[#222] p-3 rounded-lg flex items-center gap-3">
                          <div className="p-2 bg-emerald-500/5 rounded border border-emerald-500/10 text-emerald-500">
@@ -666,41 +872,57 @@ export default function App() {
 
                 {/* RIGHT COLUMN: LIVE LOGS */}
                 <div className="col-span-12 lg:col-span-3 space-y-6">
-                  <div className="bg-[#0c0c0c] border border-[#222] rounded-lg h-full flex flex-col overflow-hidden relative">
+                  <div className="bg-[#0c0c0c] border border-[#222] rounded-lg h-[450px] flex flex-col overflow-hidden relative">
                     <div className="px-4 py-3 border-b border-[#222] flex items-center justify-between bg-[#111]">
                       <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
-                        <Terminal size={12} /> Live_Feed
+                        <Terminal size={12} /> Console_Ativo
                       </h3>
                       <div className="flex gap-1">
-                        <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
-                        <div className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+                        <div className="w-1.5 h-1.5 rounded-full bg-red-500/50" />
+                        <div className="w-1.5 h-1.5 rounded-full bg-yellow-500/50" />
                         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                       </div>
                     </div>
-                    <div className="p-4 flex-1 font-mono text-[9px] leading-relaxed overflow-hidden">
-                       <div className="space-y-1.5 text-emerald-500/40">
-                          <p className="text-emerald-500/80">{"[INFO] Initializing system sequence..."}</p>
-                          <p>{"[OK] Node.js environment detected"}</p>
-                          <p>{"[OK] SSH modules loaded"}</p>
-                          <p className="text-blue-400">{"[SEC] RSA keys handshake complete"}</p>
-                          <p>{"[OK] Project database synchronized"}</p>
-                          <p>{"[OK] GUI rendering: 144fps"}</p>
-                          <p className="text-yellow-500/70">{"[WARN] Latency detected in node-02"}</p>
-                          <p>{"[INFO] Scanning for local changes..."}</p>
-                          <p>{"[OK] Found 4 modified files in SistemaFF"}</p>
-                          <p className="animate-pulse text-emerald-500">{"[READY] Awaiting user command_"}</p>
+                    <div className="p-4 flex-1 font-mono text-[9px] leading-relaxed overflow-hidden bg-black/40 flex flex-col">
+                       <div className="mb-4 text-emerald-500/60 leading-[8px] whitespace-pre shrink-0">
+{`
+    _   _   _   _   _   _  
+   / \\ / \\ / \\ / \\ / \\ / \\ 
+  ( D | E | P | L | O | Y )
+   \\_/ \\_/ \\_/ \\_/ \\_/ \\_/ 
+`}
                        </div>
                        
-                       <div className="mt-10 pt-10 border-t border-[#111] space-y-4">
+                       <div 
+                         ref={terminalRef}
+                         className="flex-1 overflow-y-auto space-y-0.5 scroll-smooth no-scrollbar"
+                       >
+                          {terminalLogs.map((log, idx) => (
+                            <motion.p 
+                              key={`${log}-${idx}`}
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              transition={{ duration: 0.2 }}
+                              className={`
+                                ${log.includes('[OK]') ? 'text-emerald-500' : ''}
+                                ${log.includes('[WARN]') ? 'text-yellow-500' : ''}
+                                ${log.includes('[ERROR]') ? 'text-red-500' : ''}
+                                ${log.includes('[SEC]') ? 'text-blue-400' : ''}
+                                ${log.includes('[INFO]') ? 'text-gray-400' : ''}
+                                ${log.includes('[SYSTEM]') || log.includes('[PROCESS]') ? 'text-purple-400' : ''}
+                              `}
+                            >
+                              {log}
+                            </motion.p>
+                          ))}
+                          <p className="animate-pulse text-emerald-500 mt-1">{"adr@sistema:~$ _"}</p>
+                       </div>
+                       
+                       <div className="mt-6 pt-6 border-t border-[#222] space-y-4">
                           <div className="p-3 bg-emerald-500/5 rounded border border-emerald-500/10">
-                             <div className="text-[8px] text-emerald-500 font-bold uppercase mb-2">Last Deployment</div>
+                             <div className="text-[8px] text-emerald-500 font-bold uppercase mb-2">Último Deployment</div>
                              <div className="text-[11px] text-white font-bold">{projects[0]?.name || 'N/A'}</div>
-                             <div className="text-[9px] text-gray-600 mt-1">{projects[0]?.lastDeploy || 'Never'}</div>
-                          </div>
-                          
-                          <div className="p-3 bg-blue-500/5 rounded border border-blue-500/10">
-                             <div className="text-[8px] text-blue-500 font-bold uppercase mb-2">System Uptime</div>
-                             <div className="text-[11px] text-white font-mono">04:22:15:09</div>
+                             <div className="text-[9px] text-gray-600 mt-1">{projects[0]?.lastDeploy || 'Nunca'}</div>
                           </div>
                        </div>
                     </div>
@@ -821,7 +1043,12 @@ export default function App() {
                       </div>
                     ))
                   )}
-                  {isSending && <span className="animate-pulse">_</span>}
+                  {isSending && (
+                    <div className="flex items-center gap-2 mt-2 text-blue-400 font-bold italic animate-pulse">
+                      <span>Executando processo</span>
+                      <span className="loading-dots"></span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -900,32 +1127,55 @@ export default function App() {
                   <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-300 mb-4">
                     <FolderOpen size={18} className="text-purple-500" /> Pasta de Destino no Servidor
                   </h4>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Caminho absoluto da pasta</label>
-                    <input 
-                      type="text" 
-                      value={config.destPath} 
-                      onChange={(e) => updateConfig({ destPath: e.target.value})} 
-                      placeholder="/home/adriano-martins/" 
-                      className="w-full bg-[#0a0a0a] border border-[#333] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-purple-500 font-mono text-gray-200" 
-                    />
-                    <p className="text-xs text-gray-500 mt-2 flex items-center gap-1.5">
-                      Os arquivos serão copiados temporariamente para esta pasta (ex: seu diretório home).
-                    </p>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Caminho absoluto da pasta</label>
+                      <input 
+                        type="text" 
+                        value={config.destPath} 
+                        onChange={(e) => updateConfig({ destPath: e.target.value})} 
+                        placeholder="/home/adriano-martins/" 
+                        className="w-full bg-[#0a0a0a] border border-[#333] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-purple-500 font-mono text-gray-200" 
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => updateConfig({ directUpload: !config.directUpload })}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded border transition-all text-xs font-medium ${
+                          config.directUpload 
+                          ? 'bg-purple-500/10 border-purple-500/50 text-purple-500' 
+                          : 'bg-[#222] border-[#333] text-gray-400 hover:text-gray-300'
+                        }`}
+                      >
+                        {config.directUpload ? <CheckSquare size={14} /> : <Square size={14} />}
+                        Enviar para Local Único (Direto para pasta final)
+                      </button>
+                    </div>
+
+                    {!config.directUpload && (
+                      <p className="text-xs text-gray-500 mt-2 flex items-center gap-1.5">
+                        Os arquivos serão copiados temporariamente para esta pasta (ex: seu diretório home).
+                      </p>
+                    )}
                   </div>
                   <div className="mt-4 pt-4 border-t border-[#222]">
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Caminho Final (Opcional - Mover após upload)</label>
-                    <input 
-                      type="text" 
-                      value={config.finalPath} 
-                      onChange={(e) => updateConfig({ finalPath: e.target.value})} 
-                      placeholder="/var/www/html/meu-projeto/" 
-                      className="w-full bg-[#0a0a0a] border border-[#333] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-purple-500 font-mono text-gray-200" 
-                    />
-                    <p className="text-xs text-gray-500 mt-2">
-                      Se preenchido, o sistema moverá os arquivos para este caminho usando 'mv' via SSH após o envio.
-                    </p>
-                    {config.finalPath && (
+                    {!config.directUpload && (
+                      <>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Caminho Final (Opcional - Mover após upload)</label>
+                        <input 
+                          type="text" 
+                          value={config.finalPath} 
+                          onChange={(e) => updateConfig({ finalPath: e.target.value})} 
+                          placeholder="/var/www/html/meu-projeto/" 
+                          className="w-full bg-[#0a0a0a] border border-[#333] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-purple-500 font-mono text-gray-200" 
+                        />
+                        <p className="text-xs text-gray-500 mt-2">
+                          Se preenchido, o sistema moverá os arquivos para este caminho usando 'mv' via SSH após o envio.
+                        </p>
+                      </>
+                    )}
+                    {((config.finalPath && !config.directUpload) || config.directUpload) && (
                       <div className="mt-3 flex items-center gap-2">
                         <button 
                           onClick={() => updateConfig({ useSudo: !config.useSudo })}
@@ -1132,13 +1382,36 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="overflow-y-auto max-h-80 p-2 space-y-1 bg-[#111]">
-                  {fileTree.length === 0 && (
-                    <div className="p-4 text-center text-gray-500 text-sm">
-                      Nenhum item encontrado ou pasta inacessível.
+                <div className="overflow-y-auto max-h-80 p-2 space-y-1 bg-[#111] min-h-[200px] flex flex-col">
+                  {isExplorerLoading && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-2">
+                      <Loader2 size={24} className="animate-spin text-blue-500" />
+                      <span className="text-xs uppercase tracking-widest">Lendo Diretório...</span>
                     </div>
                   )}
-                  {fileTree
+
+                  {!isExplorerLoading && explorerError && (
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                      <AlertCircle size={32} className="text-red-500 mb-2 opacity-50" />
+                      <div className="text-red-400 text-sm font-bold mb-1">Erro de Acesso</div>
+                      <div className="text-gray-500 text-[11px] font-mono break-all">{explorerError}</div>
+                      <button 
+                        onClick={() => setCurrentBrowsingDir('')}
+                        className="mt-4 px-3 py-1 bg-[#222] hover:bg-[#333] text-gray-400 text-[10px] uppercase rounded transition-all"
+                      >
+                        Tentar Pasta Inicial
+                      </button>
+                    </div>
+                  )}
+
+                  {!isExplorerLoading && !explorerError && fileTree.length === 0 && (
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-gray-500">
+                       <FileBox size={32} className="mb-2 opacity-20" />
+                       <span className="text-sm">Esta pasta está vazia.</span>
+                    </div>
+                  )}
+
+                  {!isExplorerLoading && !explorerError && fileTree
                     .filter(item => explorerMode === 'files' || item.type === 'folder')
                     .map((item, idx) => (
                     <div key={idx} className="flex items-center gap-1 group">
@@ -1225,7 +1498,103 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* TAB: ANOTACOES (CMD STYLE) */}
+          {activeTab === 'anotacoes' && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="max-w-4xl mx-auto h-[calc(100vh-220px)] flex flex-col"
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-semibold text-white flex items-center gap-2">
+                  <TerminalSquare size={20} className="text-yellow-500" /> 
+                  Terminal de Anotações: <span className="text-emerald-500 font-mono text-sm">{selectedProject?.name}</span>
+                </h3>
+              </div>
+
+              <div className="flex-1 bg-[#050505] border border-[#2a2a2a] rounded-xl flex flex-col shadow-2xl overflow-hidden font-mono relative">
+                {/* Header do CMD */}
+                <div className="px-4 py-2 border-b border-[#222] flex items-center justify-between text-[10px] text-gray-500 uppercase tracking-widest bg-[#0a0a0a]">
+                  <div className="flex items-center gap-4">
+                    <span className="flex items-center gap-2 text-yellow-500/70">
+                      <Terminal size={12} /> 
+                      PROJECT_NOTES.BAT
+                    </span>
+                    <span className="text-gray-700">// STATUS: WRITABLE // ENCODING: UTF-8</span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-500/20"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/20"></div>
+                  </div>
+                </div>
+
+                {/* Área de Texto CMD Style */}
+                <div className="flex-1 relative group bg-[url('https://grainy-gradients.vercel.app/noise.svg')] bg-opacity-5">
+                  <div className="absolute left-4 top-4 text-emerald-500/50 pointer-events-none select-none font-bold">
+                    { (config.notes || '').length > 0 ? "~$ " : "adr@deploy-manager:~$ " }
+                  </div>
+                  <textarea 
+                    value={config.notes || ''}
+                    onChange={(e) => updateConfig({ notes: e.target.value })}
+                    spellCheck={false}
+                    className={`w-full h-full bg-transparent p-4 text-[#cccccc] focus:outline-none resize-none leading-relaxed caret-emerald-500 selection:bg-emerald-500/30 font-mono text-sm transition-all duration-300 ${
+                      (config.notes || '').length > 0 ? 'pl-[55px]' : 'pl-[235px]'
+                    }`}
+                    placeholder="Aguardando entrada de dados..."
+                  />
+                  
+                  {/* Scanline Effect embutido na área de texto */}
+                  <div className="pointer-events-none absolute inset-0 opacity-[0.03] bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_3px,4px_100%]" />
+                  
+                  {/* Decoração CMD */}
+                  <div className="absolute bottom-4 right-4 text-[9px] text-gray-700 select-none flex gap-4">
+                    <span>L:{ (config.notes || '').split('\n').length } C:{ (config.notes || '').length }</span>
+                    <span className="animate-pulse">[READY]</span>
+                  </div>
+                </div>
+              </div>
+              <p className="text-[10px] text-gray-600 mt-4 italic text-center uppercase tracking-widest">
+                Os dados são persistidos automaticamente no núcleo de configuração.
+              </p>
+            </motion.div>
+          )}
         </main>
+
+        {/* STATUS BAR (VS CODE STYLE) */}
+        <footer className={`h-[22px] ${isSending ? 'bg-[#007acc]' : 'bg-[#007acc]'} flex items-center px-3 text-[12px] text-white shrink-0 z-30 transition-colors`}>
+          <div className="flex items-center gap-3 h-full">
+            <div className="flex items-center gap-1.5 hover:bg-white/10 px-2 h-full cursor-pointer">
+              <ShieldCheck size={14} />
+              <span>SSH: {selectedProject?.config.sshHost || 'Disconnected'}</span>
+            </div>
+            {isSending && (
+              <div className="flex items-center gap-1.5 px-2 h-full italic">
+                <Loader2 size={12} className="animate-spin" />
+                <span>Enviando arquivos...</span>
+              </div>
+            )}
+          </div>
+
+          <div className="ml-auto flex items-center gap-4 h-full">
+             <div className="hover:bg-white/10 px-2 h-full cursor-pointer flex items-center gap-1">
+               <Cpu size={12} />
+               <span>4%</span>
+             </div>
+             <div className="hover:bg-white/10 px-2 h-full cursor-pointer flex items-center gap-1">
+               <Database size={12} />
+               <span>1.2GB</span>
+             </div>
+             <div className="hover:bg-white/10 px-2 h-full cursor-pointer">
+               <span>UTF-8</span>
+             </div>
+             <div className="hover:bg-white/10 px-2 h-full cursor-pointer flex items-center gap-1">
+               <Zap size={14} className="text-yellow-300" />
+               <span>v4.0.8</span>
+             </div>
+          </div>
+        </footer>
       </div>
 
       {/* NEW PROJECT MODAL */}

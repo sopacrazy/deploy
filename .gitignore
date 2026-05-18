@@ -10,3 +10,4 @@ projects.json
 projects_db.json
 dist_desktop/
 .vscode/
+*.rar

@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 const fs = require('fs');
 const { Client: SCPClient } = require('node-scp');
 const { Client: SSHClient } = require('ssh2');
@@ -88,32 +88,99 @@ ipcMain.handle('save-projects', async (event, projects) => {
 
 // Handler de Arquivos Local
 ipcMain.handle('list-files', async (event, dir) => {
-    let targetDir = dir || (process.platform === 'win32' ? 'C:\\' : '/');
+    let targetDir = dir;
+    
+    // Se não houver diretório, começa pela pasta do usuário (mais seguro que C:\)
+    if (!targetDir) {
+        targetDir = app.getPath('home');
+    }
+
     try {
         if (!fs.existsSync(targetDir)) return { error: "Diretório não existe" };
+        
+        // Usamos readdir normal e filtramos erros por item para não travar a lista toda
         const items = fs.readdirSync(targetDir, { withFileTypes: true });
+        const validFiles = [];
+
+        for (const item of items) {
+            try {
+                validFiles.push({
+                    name: item.name,
+                    type: item.isDirectory() ? 'folder' : 'file'
+                });
+            } catch (e) {
+                // Pula arquivos que não conseguimos ler (permissão, etc)
+                continue;
+            }
+        }
+
         return { 
             currentDir: targetDir,
             parentDir: path.dirname(targetDir),
-            files: items.map(item => ({
-                name: item.name,
-                type: item.isDirectory() ? 'folder' : 'file'
-            }))
+            files: validFiles
         };
     } catch (error) {
+        console.error("Erro ao listar arquivos:", error);
         return { error: error.message };
     }
 });
 
-// --- LÓGICA DE DEPLOY REAL (SSH/SipcMain.handle('run-deploy', async (event, { config }) => {
+// --- LÓGICA DE DEPLOY REAL (SSH/SCP) ---
+ipcMain.handle('run-deploy', async (event, { config }) => {
     const executionLog = [];
     const addLog = (msg, type = 'info') => {
         const timestamp = new Date().toLocaleTimeString();
-        executionLog.push({ timestamp, message: msg, type });
+        const logEntry = { timestamp, message: msg, type };
+        executionLog.push(logEntry);
         console.log(`[${type.toUpperCase()}] ${msg}`);
+        if (mainWindow) {
+            mainWindow.webContents.send('deploy-log', logEntry);
+        }
     };
 
     try {
+        // 0. Build Automático (NOVO)
+        const needsBuild = config.files.some(f => f.toLowerCase().includes('dist') || f.toLowerCase().includes('build'));
+        if (needsBuild) {
+            addLog(`Detectada pasta de build/dist. Iniciando 'npm run build' em: ${config.localPath}...`, 'info');
+            await new Promise((resolve, reject) => {
+                const normalizedPath = path.normalize(config.localPath);
+                const buildProcess = spawn('npm', ['run', 'build'], { 
+                    cwd: normalizedPath,
+                    shell: true 
+                });
+                
+                buildProcess.stdout.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => {
+                        if (line.trim()) addLog(`[BUILD] ${line.trim()}`, 'info');
+                    });
+                });
+
+                buildProcess.stderr.on('data', (data) => {
+                    const lines = data.toString().split('\n');
+                    lines.forEach(line => {
+                        if (line.trim()) addLog(`[BUILD-ERR] ${line.trim()}`, 'info');
+                    });
+                });
+
+                buildProcess.on('close', (code) => {
+                    if (code === 0) {
+                        addLog('Build concluído com sucesso.', 'success');
+                        resolve();
+                    } else {
+                        addLog(`Build falhou com código ${code}`, 'error');
+                        reject(new Error(`Build falhou com código ${code}`));
+                    }
+                });
+
+                buildProcess.on('error', (err) => {
+                    addLog(`Erro ao iniciar build: ${err.message}`, 'error');
+                    reject(err);
+                });
+            });
+        }
+
         // 1. Envio de Arquivos (SCP)
         addLog(`Iniciando conexão SCP com ${config.sshHost}...`);
         const scpClient = await SCPClient({
@@ -222,8 +289,7 @@ ipcMain.handle('list-files', async (event, dir) => {
         return { success: false, error: error.message, log: executionLog };
     }
 });
-   }
-});
+
 
 app.on('ready', () => {
   createWindow();

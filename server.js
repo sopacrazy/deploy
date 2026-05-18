@@ -3,6 +3,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import cors from 'cors';
 import { Client } from 'node-scp';
+import { exec, spawn } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const app = express();
 const port = 3001; // Not used for listening, see PORT at bottom
@@ -140,6 +144,78 @@ app.post('/api/deploy', async (req, res) => {
     };
 
     try {
+        // 0. Build Automático (NOVO)
+        const needsBuild = config.files.some(f => f.toLowerCase().includes('dist') || f.toLowerCase().includes('build'));
+        if (needsBuild) {
+            addLog(`Detectada pasta de build/dist. Iniciando 'npm run build' em: ${config.localPath}...`);
+            try {
+                const normalizedPath = path.normalize(config.localPath);
+                
+                // Verificar se node_modules existe
+                const nodeModulesPath = path.join(normalizedPath, 'node_modules');
+                let hasNodeModules = true;
+                try {
+                    await fs.access(nodeModulesPath);
+                } catch {
+                    hasNodeModules = false;
+                }
+
+                if (!hasNodeModules) {
+                    addLog(`node_modules não encontrado em ${normalizedPath}. Executando 'npm install'...`);
+                    await new Promise((resolve, reject) => {
+                        const install = spawn('npm', ['install'], { 
+                            cwd: normalizedPath,
+                            shell: true 
+                        });
+                        install.stdout.on('data', (data) => process.stdout.write(`[INSTALL] ${data}`));
+                        install.stderr.on('data', (data) => process.stderr.write(`[INSTALL-ERR] ${data}`));
+                        install.on('close', (code) => {
+                            if (code === 0) {
+                                addLog('Dependências instaladas com sucesso.', 'success');
+                                resolve();
+                            } else {
+                                reject(new Error(`Falha ao instalar dependências (Código ${code})`));
+                            }
+                        });
+                    });
+                }
+
+                // Usando spawn para streaming de logs no terminal
+                await new Promise((resolve, reject) => {
+                    const build = spawn('npm', ['run', 'build'], { 
+                        cwd: normalizedPath,
+                        shell: true // Necessário no Windows para rodar .cmd/.bat
+                    });
+
+                    build.stdout.on('data', (data) => {
+                        process.stdout.write(`[BUILD] ${data}`);
+                    });
+
+                    build.stderr.on('data', (data) => {
+                        process.stderr.write(`[BUILD-ERR] ${data}`);
+                    });
+
+                    build.on('close', (code) => {
+                        if (code === 0) {
+                            addLog('Build local concluído com sucesso.', 'success');
+                            resolve();
+                        } else {
+                            addLog(`Erro no build local (Código ${code}). Verifique o terminal.`, 'error');
+                            reject(new Error(`Build falhou com código ${code}`));
+                        }
+                    });
+
+                    build.on('error', (err) => {
+                        addLog(`Falha ao iniciar build: ${err.message}`, 'error');
+                        reject(err);
+                    });
+                });
+            } catch (buildError) {
+                // O erro já foi logado no addLog dentro da promise
+                throw buildError;
+            }
+        }
+
         addLog(`Conectando ao servidor SSH: ${config.sshHost}...`);
         const client = await Client({
             host: config.sshHost,
@@ -152,11 +228,24 @@ app.post('/api/deploy', async (req, res) => {
         addLog(`Conexão SSH estabelecida.`, 'success');
 
         addLog(`Iniciando transferência de ${config.files.length} itens...`);
+        
+        // Criar as pastas de destino no servidor antes de enviar (silencioso se já existir)
         for (const file of config.files) {
             try {
-                const localPath = path.join(config.localPath, file);
+                const remoteDir = path.dirname(path.join(config.destPath, file)).replace(/\\/g, '/');
+                if (remoteDir !== '.') await client.mkdir(remoteDir); 
+            } catch (err) {
+                // Ignora erro se a pasta já existir
+            }
+        }
+
+        for (let file of config.files) {
+            file = file.trim(); // Remove espaços em branco acidentais
+            try {
+                const localPath = path.resolve(config.localPath, file);
                 const remotePath = path.join(config.destPath, file).replace(/\\/g, '/');
                 
+                addLog(`Verificando caminho local: ${localPath}`);
                 const stats = await fs.stat(localPath);
                 if (stats.isDirectory()) {
                     addLog(`Enviando pasta: ${file}...`);
@@ -186,7 +275,7 @@ app.post('/api/deploy', async (req, res) => {
                     const timestamp = "$(date +%Y%m%d_%H%M)";
 
                     // 1. BACKUP
-                    if (config.makeBackup && config.finalPath) {
+                    if (config.makeBackup && config.finalPath && !config.directUpload) {
                         config.files.forEach(file => {
                             const target = path.join(config.finalPath, file).replace(/\\/g, '/');
                             const backupName = `${target}_backup_${timestamp}`;
@@ -199,8 +288,8 @@ app.post('/api/deploy', async (req, res) => {
                         });
                     }
 
-                    // 2. MOVE
-                    if (config.finalPath) {
+                    // 2. MOVE / PERMISSIONS
+                    if (config.finalPath && !config.directUpload) {
                         config.files.forEach(file => {
                             const from = path.join(config.destPath, file).replace(/\\/g, '/');
                             const to = path.join(config.finalPath, file).replace(/\\/g, '/');
@@ -215,11 +304,23 @@ app.post('/api/deploy', async (req, res) => {
                             }
                             commands.push({ cmd: moveCmd, msg: `Mover/Permissões: ${file}` });
                         });
+                    } else if (config.directUpload && config.setPermissions) {
+                        // Se for envio direto, apenas aplicamos permissões no local final (destPath)
+                        config.files.forEach(file => {
+                            const target = path.join(config.destPath, file).replace(/\\/g, '/');
+                            let permCmd = `chown -R ${config.fileOwner || 'www-data:www-data'} "${target}" && chmod -R 755 "${target}"`;
+                            if (config.useSudo) {
+                                if (config.sshAuthMethod === 'password') permCmd = `echo "${config.sshPassword}" | sudo -S sh -c '${permCmd}'`;
+                                else permCmd = `sudo sh -c '${permCmd}'`;
+                            }
+                            commands.push({ cmd: permCmd, msg: `Aplicar Permissões: ${file}` });
+                        });
                     }
 
                     // 2.5 NPM INSTALL
-                    if (config.runNpmInstall && config.finalPath) {
-                        let npmCmd = `cd "${config.finalPath}" && npm install`;
+                    if (config.runNpmInstall && (config.finalPath || config.directUpload)) {
+                        const targetPath = config.directUpload ? config.destPath : config.finalPath;
+                        let npmCmd = `cd "${targetPath}" && npm install`;
                         if (config.useSudo) {
                             if (config.sshAuthMethod === 'password') npmCmd = `echo "${config.sshPassword}" | sudo -S sh -c '${npmCmd}'`;
                             else npmCmd = `sudo sh -c '${npmCmd}'`;
